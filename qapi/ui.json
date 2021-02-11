@@ -1105,11 +1105,13 @@
 # Display (user interface) type.
 #
 # @default: The default user interface, selecting from the first available
-#           of gtk, sdl, cocoa, and vnc.
+#           of arcan, gtk, sdl, cocoa, and vnc.
 #
 # @none: No user interface or video output display. The guest will
 #        still see an emulated graphics card, but its output will not
 #        be displayed to the QEMU user.
+#
+# @arcan: The Arcan user interface.
 #
 # @gtk: The GTK user interface.
 #
@@ -1137,7 +1139,7 @@
 #
 ##
 { 'enum'    : 'DisplayType',
-  'data'    : [ 'default', 'none', 'gtk', 'sdl',
+  'data'    : [ 'default', 'none', 'arcan', 'gtk', 'sdl',
                 'egl-headless', 'curses', 'cocoa',
                 'spice-app'] }
 

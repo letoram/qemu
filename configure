@@ -464,8 +464,8 @@ gettext="auto"
 fuse="auto"
 fuse_lseek="auto"
 multiprocess="no"
-
 malloc_trim="auto"
+arcan=""
 
 # parse CC options second
 for opt do
@@ -1562,6 +1562,10 @@ for opt do
   ;;
   --disable-multiprocess) multiprocess="no"
   ;;
+  --disable-arcan) arcan="no"
+  ;;
+  --enable-arcan) arcan="yes"
+  ;;
   *)
       echo "ERROR: unknown option $opt"
       echo "Try '$0 --help' for more information"
@@ -1915,6 +1919,7 @@ disabled with --disable-FEATURE, default is enabled if available
   fuse            FUSE block device export
   fuse-lseek      SEEK_HOLE/SEEK_DATA support for FUSE exports
   multiprocess    Multiprocess QEMU support
+  arcan           Arcan UI support
 
 NOTE: The object files are built at the place where configure is launched
 EOF
@@ -3595,6 +3600,32 @@ case "$fdt" in
     fi
     ;;
 esac
+
+##########################################
+# arcan shmif probe
+
+if $pkg_config arcan-shmif --exists; then
+  if test "$opengl" = "no" ; then
+		arcanconfig="$pkg_config arcan-shmif"
+  else
+	  arcanconfig="$pkg_config arcan-shmif-ext"
+	fi
+	arcan="yes"
+else
+	if test "$arcan" = "yes"; then
+		feature_not_found "arcan" "Install arcan-shmif-dev"
+	fi
+	arcan="no"
+fi
+
+if test "$arcan" != "no" ; then
+  arcan_cflags=`$arcanconfig --cflags 2> /dev/null`
+  if test "$static" = "yes" ; then
+    arcan_libs=`$arcanconfig --static-libs 2>/dev/null`
+  else
+    arcan_libs=`$arcanconfig --libs 2> /dev/null`
+  fi
+fi
 
 ##########################################
 # opengl probe (for sdl2, gtk, milkymist-tmu2)
@@ -5848,6 +5879,11 @@ if test "$gbm" = "yes" ; then
     echo "GBM_CFLAGS=$gbm_cflags" >> $config_host_mak
 fi
 
+if test "$arcan" = "yes" ; then
+    echo "CONFIG_ARCAN=y" >> $config_host_mak
+    echo "ARCAN_LIBS=$arcan_libs" >> $config_host_mak
+    echo "ARCAN_CFLAGS=$arcan_cflags" >> $config_host_mak
+fi
 
 if test "$avx2_opt" = "yes" ; then
   echo "CONFIG_AVX2_OPT=y" >> $config_host_mak

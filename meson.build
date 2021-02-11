@@ -468,6 +468,11 @@ if 'CONFIG_GBM' in config_host
   gbm = declare_dependency(compile_args: config_host['GBM_CFLAGS'].split(),
                            link_args: config_host['GBM_LIBS'].split())
 endif
+arcan = not_found
+if 'CONFIG_ARCAN' in config_host
+  arcan = declare_dependency(compile_args: config_host['ARCAN_CFLAGS'].split(),
+                           link_args: config_host['ARCAN_LIBS'].split())
+endif
 virgl = not_found
 if 'CONFIG_VIRGL' in config_host
   virgl = declare_dependency(compile_args: config_host['VIRGL_CFLAGS'].split(),
