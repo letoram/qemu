@@ -1,7 +1,7 @@
 /*
  * QEMU Arcan-shmif display driver
  *
- * Copyright (c) 2016 Bjorn Stahl
+ * Copyright (c) 2016-2021 Bjorn Stahl
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -33,9 +33,26 @@
 #include "sysemu/sysemu.h"
 #include "sysemu/runstate.h"
 
+/*
+ * TODO:
+ * [ ] Audio support, set shmif_primary as an accessor to the display if necessary
+ *     build from audio/sdlaudio.c as they are mostly similar
+ * [ ] VirGL / dma-buf style forwarding, see gtk-egl.c
+ * [ ] Map virtio-VGA framebuffer directly into SHMIF segment if formats match (big saving)
+ * [ ] (Linux host) Switch input from SDL2+conv to subid-as-linux-keycode
+ * [ ] State controls (load / save)
+ * [ ] Text console to TUI
+ * [ ] Plugging in multiple displays as secondary segments
+ * [ ] Resize propagation [ dpy_set_ui_info() ]
+ * [ ] Hardware mouse cursor path [ SEGREQ(CURSOR) ]
+ * [ ] SHMIF proxying into guest [ handover alloc, semaphores being a real PITA ]
+ * [ ] DEBUG segment handler for memory inspection
+ * [ ] SEGID_ICON request and if OK, raster icons/qemu.svg into it
+ * [ ] Expose OUTPUT segment (at least audio-out)
+ */
+
 #define WANT_ARCAN_SHMIF_HELPER
-/* this means our pkg-config doesn't set the right flags */
-#include <arcan/shmif/arcan_shmif.h>
+#include <arcan_shmif.h>
 
 enum blitmode {
     BLIT_SHARE, /* try and share vidp with underlying layer directly */
@@ -253,9 +270,9 @@ static void arcan_update(DisplayChangeListener *dcl,
  * i.e. the shmifext_signal uses cont->vidp as basis for packing into texture
  */
 #ifdef CONFIG_OPENGL
-		case BLIT_TXPACK:
+    case BLIT_TXPACK:
 
-		break;
+    break;
 #endif
     }
 
@@ -280,13 +297,13 @@ static QEMUGLContext arcan_egl_create_context(DisplayChangeListener *dcl,
     defs.minor = params->minor_ver;
     defs.builtin_fbo = false;
 /* FIXME: populate defs from "qemu_egl_config" */
-		uintptr_t i = 0;
-		for (i = 0; i < 64; i++)
-			if (!(context_mask & (1 << i))){
-			context_mask = 1 << i;
-			break;
-		}
-		arcan_shmifext_setup(&dst->dpy, defs);
+    uintptr_t i = 0;
+    for (i = 0; i < 64; i++)
+      if (!(context_mask & (1 << i))){
+        context_mask = 1 << i;
+        break;
+      }
+    arcan_shmifext_setup(&dst->dpy, defs);
 
     return (QEMUGLContext) i;
 }
@@ -319,7 +336,7 @@ static void arcan_egl_destroy_context(DisplayChangeListener *dcl, QEMUGLContext 
 {
     struct dpy_state *dst = container_of(dcl, struct dpy_state, dcl);
     arcan_shmifext_drop_context(&dst->dpy);
-		context_mask &= ~(1 << (uintptr_t)ctx);
+    context_mask &= ~(1 << (uintptr_t)ctx);
 }
 
 static int arcan_egl_make_context_current(DisplayChangeListener *dcl,
@@ -329,15 +346,15 @@ static int arcan_egl_make_context_current(DisplayChangeListener *dcl,
     return arcan_shmifext_make_current(&dst->dpy);
 }
 
-/* 
- * Because https://github.com/qemu/qemu/commit/c110d949b8166a633179edcf3390a42673ac843c 
- * 
+/*
+ * Because https://github.com/qemu/qemu/commit/c110d949b8166a633179edcf3390a42673ac843c
+ *
 static QEMUGLContext arcan_egl_get_current_context(DisplayChangeListener *dcl)
 {
     struct dpy_state *dst = container_of(dcl, struct dpy_state, dcl);
     uintptr_t context = 0;
     arcan_shmifext_egl_meta(&dst->dpy, NULL, NULL, &context);
-	return (QEMUGLContext) context;
+    return (QEMUGLContext) context;
 }
  */
 
@@ -367,10 +384,20 @@ static void reset_dpykbd(struct dpy_state* dpy)
 static bool input_event(DisplayChangeListener *dcl, struct dpy_state* dpy,
                         struct arcan_shmif_cont* con, arcan_ioevent *iev)
 {
+/* we could use this to provide a new usb device, character device and so
+ * on */
     if (iev->devkind != EVENT_IDEVKIND_KEYBOARD &&
         iev->devkind != EVENT_IDEVKIND_MOUSE)
         return false;
 
+/* FIXME: this has changed - if we can know it is a linux keycode etc. there
+ * is automatic translation / interpreation / forwarding now through the use
+ * of qemu_input_linux_to_keycode and then qemu_input_key_number_to_qcode.
+ *
+ * Due to changes practically imposed by the wayland bridge, we can assume
+ * that even for SDL2 (the other possible source) the subid will be a linux
+ * keycode. The situation is slightly different on BSDs.
+ */
     if (iev->datatype == EVENT_IDATATYPE_TRANSLATED){
         dpy->kbd_statetbl[iev->input.translated.scancode] =
                                                 iev->input.translated.active;
@@ -413,6 +440,9 @@ static bool input_event(DisplayChangeListener *dcl, struct dpy_state* dpy,
 static void system_event(DisplayChangeListener *dcl, struct dpy_state *dpy,
                          struct arcan_shmif_cont* con, arcan_tgtevent *iev)
 {
+    struct dpy_state *dst = container_of(dcl, struct dpy_state, dcl);
+    struct arcan_shmif_cont *acon = &dst->dpy;
+
     switch (iev->kind){
     case TARGET_COMMAND_EXIT:
         qemu_system_shutdown_request(SHUTDOWN_CAUSE_HOST_UI);
@@ -428,6 +458,15 @@ static void system_event(DisplayChangeListener *dcl, struct dpy_state *dpy,
 /* re- query for clipboard, mouse cursor, output segment, ... */
         break;
         }
+
+    /* send a new complete frame immediately as this might come from migration
+     * where the other end won't create local resources until new contents has
+      * arrived, while the guest might not update until there is activity */
+        acon->dirty.x1 = 0;
+        acon->dirty.y1 = 0;
+        acon->dirty.x2 = acon->w;
+        acon->dirty.y2 = acon->h;
+        arcan_shmif_signal(acon, SHMIF_SIGVID);
     break;
     case TARGET_COMMAND_NEWSEGMENT:
 /* Check ID for requested display or special (clipboard, mouse cursor),
@@ -467,6 +506,10 @@ static void system_event(DisplayChangeListener *dcl, struct dpy_state *dpy,
                 reset_dpykbd(dpy);
             }
         }
+/* something to request / initiate window resize? */
+    break;
+    case TARGET_COMMAND_OUTPUTHINT:
+/* FIXME: update refresh rate */
     break;
     case TARGET_COMMAND_DEVICE_NODE:
 /*
@@ -484,7 +527,6 @@ static void arcan_refresh(DisplayChangeListener *dcl)
 /* flush input event loop */
     struct dpy_state *dpy = container_of(dcl, struct dpy_state, dcl);
     struct arcan_shmif_cont *con = &dpy->dpy;
-
 
     graphic_hw_update(NULL);
 
@@ -511,12 +553,16 @@ static void arcan_switch(DisplayChangeListener *dcl,
     struct dpy_state *dst = container_of(dcl, struct dpy_state, dcl);
     struct arcan_shmif_cont *dpy = &dst->dpy;
 
+/* FIXME:
+ * toggle back and forth between tpack format here
+ */
+
     if (dpy->addr){
         dpy->hints = SHMIF_RHINT_SUBREGION | SHMIF_RHINT_IGNORE_ALPHA;
 #ifdef CONFIG_OPENGL
         if (arcan_ctx.gl){
-		 			dpy->hints |= SHMIF_RHINT_ORIGO_UL;
-				}
+          dpy->hints |= SHMIF_RHINT_ORIGO_UL;
+        }
 #endif
         struct shmif_resize_ext ext = {
             .vbuf_cnt = arcan_ctx.vbufc,
@@ -524,10 +570,10 @@ static void arcan_switch(DisplayChangeListener *dcl,
             .abuf_sz = arcan_ctx.abuf_sz
         };
 
-				arcan_shmif_lock(&dst->dpy);
+        arcan_shmif_lock(&dst->dpy);
         arcan_shmif_resize_ext(dpy, surface_width(new_surface),
                            surface_height(new_surface), ext);
-				arcan_shmif_unlock(&dst->dpy);
+        arcan_shmif_unlock(&dst->dpy);
     }
 
     if (new_surface){
@@ -587,6 +633,26 @@ static void arcan_vmstate_chg(void *opaque, int running, RunState state)
     update_display_titles();
 }
 
+/*
+static void arcan_text_update(DisplayChangeListener *dcl,
+                              int x, int y, int w, int h)
+{
+    printf("text update: %d, %d, %d * %d\n", x, y, w, h);
+}
+
+static void arcan_text_cursor(DisplayChangeListener *dcl,
+		                          int x, int y)
+{
+	printf("move to %d, %d\n", x, y);
+}
+
+static void arcan_text_resize(DisplayChangeListener *dcl,
+		                          int w, int h)
+{
+	printf("rext to  %d, %d\n", w, h);
+}
+ */
+
 static const DisplayChangeListenerOps dcl_ops = {
     .dpy_name             = "arcan",
     .dpy_gfx_update       = arcan_update,
@@ -594,28 +660,32 @@ static const DisplayChangeListenerOps dcl_ops = {
     .dpy_gfx_check_format = arcan_check_format,
     .dpy_refresh          = arcan_refresh,
     .dpy_mouse_set        = arcan_mouse_warp,
-    .dpy_cursor_define    = arcan_mouse_define,
-};
-
+    .dpy_cursor_define    = arcan_mouse_define
+/*
+ *  .dpy_text_resize      = arcan_text_resize,
+    .dpy_text_update      = arcan_text_update,
+    .dpy_text_cursor      = arcan_text_cursor
+ */
 #ifdef CONFIG_OPENGL
-static const DisplayChangeListenerOps dcl_gl_ops = {
-    .dpy_name             = "arcan",
-    .dpy_gfx_update       = arcan_update,
-    .dpy_gfx_switch       = arcan_switch,
-    .dpy_gfx_check_format = arcan_check_format,
-    .dpy_refresh          = arcan_refresh,
-    .dpy_mouse_set        = arcan_mouse_warp,
-    .dpy_cursor_define    = arcan_mouse_define,
-
+		,
     .dpy_gl_ctx_make_current = arcan_egl_make_context_current,
 /*    .dpy_gl_ctx_get_current  = arcan_egl_get_current_context, */
     .dpy_gl_ctx_create   = arcan_egl_create_context,
     .dpy_gl_ctx_destroy  = arcan_egl_destroy_context,
     .dpy_gl_scanout_texture = arcan_gl_scanout_texture,
     .dpy_gl_scanout_disable = arcan_gl_scanout_disable,
-    .dpy_gl_update       = arcan_gl_update
-};
+    .dpy_gl_update       = arcan_gl_update,
+/* new ones:
+ *  .dpy_gl_cursor_position,
+ *  .dpy_gl_release_dmabuf,
+ *  .dpy_gl_update,
+ *  .dpy_gl_has_dmabuf,
+ *  .dpy_gl_scanout_dmabuf,
+ *  .dpy_gl_cursor_dmabuf,
+ *  .dpy_gl_cursor_position
+ */
 #endif
+};
 
 static int wait_for_subseg(struct arcan_shmif_cont *cont)
 {
@@ -660,7 +730,7 @@ static void update_display_titles(void)
 static void arcan_display_early_init(DisplayOptions *o)
 {
     assert(o->type == DISPLAY_TYPE_ARCAN);
-		if (o->has_gl && o->gl){
+    if (o->has_gl && o->gl){
 #ifdef CONFIG_OPENGL
         display_opengl = 1;
 #endif
@@ -681,6 +751,15 @@ static void arcan_display_init(DisplayState *ds, DisplayOptions *o)
     prim.hints = SHMIF_RHINT_SUBREGION;
     arcan_shmif_setprimary(SHMIF_INPUT, &prim);
 
+/* FIXME:
+ * there is an embeddable io/icons/qemu.svg that we could translate / draw
+ * into an icon segment here (so request SEGID_ICON, if OK - draw into it)
+ */
+
+/* FIXME:
+ * we can also send a custom cursor segment request and attach that to the
+ * display structure in order for the pointer to be correct
+ */
     arcan_shmif_enqueue(&prim, &(arcan_event){
         .category = EVENT_EXTERNAL,
         .ext.kind = ARCAN_EVENT(CURSORHINT),
@@ -731,19 +810,15 @@ static void arcan_display_init(DisplayState *ds, DisplayOptions *o)
 
         disp->dcl.con = cons;
 #ifdef CONFIG_OPENGL
-				if (display_opengl){
+        if (display_opengl){
           struct arcan_shmifext_setup defs = arcan_shmifext_defaults(&disp->dpy);
-					defs.builtin_fbo = false;
-					arcan_shmifext_setup(&disp->dpy, defs);
+          defs.builtin_fbo = false;
+          arcan_shmifext_setup(&disp->dpy, defs);
 
-					arcan_ctx.gl = true;
-					disp->dcl.ops = &dcl_gl_ops;
-				}
-				else
-					disp->dcl.ops = &dcl_ops;
-#else
-        disp->dcl.ops = &dcl_ops;
+          arcan_ctx.gl = true;
+        }
 #endif
+        disp->dcl.ops = &dcl_ops;
 
 /* this will likely invalidate prim, don't use it after this point */
         register_displaychangelistener(&disp->dcl);

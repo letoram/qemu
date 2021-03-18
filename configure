@@ -465,7 +465,7 @@ fuse="auto"
 fuse_lseek="auto"
 multiprocess="no"
 malloc_trim="auto"
-arcan=""
+arcan="auto"
 
 # parse CC options second
 for opt do
